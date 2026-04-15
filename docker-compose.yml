@@ -1,0 +1,49 @@
+# docker-compose.yml
+#
+# Runs Rhine Alps Express + PostgreSQL locally.
+#
+# Usage:
+#   docker compose up --build        # first run
+#   docker compose up                # subsequent runs
+#   docker compose down              # stop
+#   docker compose down -v           # stop and delete the database volume
+
+services:
+
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: rhine_alps_express
+    ports:
+      - "5433:5432"   # expose on 5433 so it doesn't clash with a local Postgres
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "3000:3000"
+    env_file:
+      - .env.local       # create from .env.example; set DATABASE_URL to the db service below
+    environment:
+      # Override DATABASE_URL to point at the compose db service
+      DATABASE_URL: "postgresql://postgres:postgres@db:5432/rhine_alps_express"
+      # Set to "true" on first run to seed the database
+      SEED_DB: "false"
+
+volumes:
+  postgres_data:
