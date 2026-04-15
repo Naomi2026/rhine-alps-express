@@ -88,6 +88,19 @@ export async function POST(
       },
     });
 
+    // §3.4 — Decrement slot capacity when order is cancelled (do not go below 0)
+    if (order.slotId && order.deliveryDate) {
+      await db.slotCapacity.updateMany({
+        where: {
+          slotId: order.slotId,
+          pricingBand: order.pricingBand,
+          date: order.deliveryDate,
+          bookedOrders: { gt: 0 },
+        },
+        data: { bookedOrders: { decrement: 1 } },
+      });
+    }
+
     // §21.3 — Convert paid amount to customer credit
     const totalPaid = order.payments.reduce((sum, p) => sum + Number(p.amount), 0);
     if (totalPaid > 0) {

@@ -677,7 +677,82 @@ async function main() {
 
   console.log("  ✓ Order 4 — PLACED (Band 1, credit auto-applied)");
 
-  // ── 7. Seed a sample audit log entry ─────────────────────────────────────
+  // ── 7. Historical completed orders to back the pre-set loyalty counts ────────
+  //
+  // jane.kamau has loyaltyCount=7: Order 1 (above) is qualifying order #1.
+  // Seed 6 more COMPLETED orders to account for orders #2–#7 (BUG-006 fix).
+  // john.njoroge has loyaltyCount=3: seed 3 COMPLETED orders.
+  // These use far-past dates and minimal data — no delivery/OTP/payment records needed.
+
+  const loyaltyBaseDate = new Date();
+  loyaltyBaseDate.setDate(loyaltyBaseDate.getDate() - 60);
+  loyaltyBaseDate.setHours(0, 0, 0, 0);
+
+  for (let i = 2; i <= 7; i++) {
+    const d = new Date(loyaltyBaseDate);
+    d.setDate(d.getDate() + i);
+    await prisma.order.create({
+      data: {
+        orderRef: orderRef(d, i),
+        customerId: customer1.id,
+        status: OrderStatus.COMPLETED,
+        paymentStatus: PaymentStatus.PAID,
+        paymentMethod: PaymentMethod.MPESA,
+        deliveryAddress: "Infinity Industrial Park, Ruiru",
+        pricingBand: PricingBand.BAND_1,
+        distanceKm: 0.5,
+        bottleUnitPrice: 150,
+        deliveryFee: 0,
+        subtotal: 150,
+        totalAmount: 150,
+        creditApplied: 0,
+        amountDue: 150,
+        slotId: slot1.id,
+        deliveryDate: d,
+        isAdminConfirmed: true,
+        countsForLoyalty: true,
+        items: {
+          create: [{ productName: "20L Bottle – Refill", productSku: "20L-REFILL", quantity: 1, unitPrice: 150, lineTotal: 150, isExchange: true }],
+        },
+      },
+    });
+  }
+
+  console.log("  ✓ Historical COMPLETED orders seeded for jane.kamau (loyalty orders #2–#7)");
+
+  for (let i = 1; i <= 3; i++) {
+    const d = new Date(loyaltyBaseDate);
+    d.setDate(d.getDate() + i + 10);
+    await prisma.order.create({
+      data: {
+        orderRef: orderRef(d, i + 10),
+        customerId: customer2.id,
+        status: OrderStatus.COMPLETED,
+        paymentStatus: PaymentStatus.PAID,
+        paymentMethod: PaymentMethod.MPESA,
+        deliveryAddress: "Kahawa Sukari, Nairobi",
+        pricingBand: PricingBand.BAND_2,
+        distanceKm: 5.2,
+        bottleUnitPrice: 200,
+        deliveryFee: 0,
+        subtotal: 200,
+        totalAmount: 200,
+        creditApplied: 0,
+        amountDue: 200,
+        slotId: slot1.id,
+        deliveryDate: d,
+        isAdminConfirmed: true,
+        countsForLoyalty: true,
+        items: {
+          create: [{ productName: "20L Bottle – Refill", productSku: "20L-REFILL", quantity: 1, unitPrice: 200, lineTotal: 200, isExchange: true }],
+        },
+      },
+    });
+  }
+
+  console.log("  ✓ Historical COMPLETED orders seeded for john.njoroge (loyalty orders #1–#3)");
+
+  // ── 8. Seed a sample audit log entry ─────────────────────────────────────
 
   await prisma.auditLog.create({
     data: {

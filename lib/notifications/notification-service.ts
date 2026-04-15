@@ -135,88 +135,100 @@ async function sendEmail(_input: {
 }
 
 // ── Public notification helpers ────────────────────────────────────────────────
+//
+// IMPORTANT: All `userId` fields must be User.id (from the User table), NOT
+// Customer.id or Rider.id. Passing a profile-table PK will cause a FK violation
+// on Notification.userId and the notification will be silently dropped.
 
 export async function notifyOrderPlaced(data: {
-  customerId: string;
+  /** User.id of the customer — NOT Customer.id */
+  userId: string;
   customerName: string;
   orderRef: string;
   totalAmount: number;
   deliveryAddress: string;
   slotLabel?: string;
 }): Promise<void> {
-  const { subject, body } = templates.orderPlaced(data);
-  const channel = await resolveChannel(data.customerId);
-  await send({ userId: data.customerId, event: "order.placed", subject, body, channel });
+  const { subject, body } = templates.orderPlaced({ customerName: data.customerName, orderRef: data.orderRef, totalAmount: data.totalAmount, deliveryAddress: data.deliveryAddress, slotLabel: data.slotLabel });
+  const channel = await resolveChannel(data.userId);
+  await send({ userId: data.userId, event: "order.placed", subject, body, channel });
 }
 
 export async function notifyPaymentConfirmed(data: {
-  customerId: string;
+  /** User.id of the customer — NOT Customer.id */
+  userId: string;
   customerName: string;
   orderRef: string;
   amountPaid: number;
 }): Promise<void> {
-  const { subject, body } = templates.paymentConfirmed(data);
-  const channel = await resolveChannel(data.customerId);
-  await send({ userId: data.customerId, event: "payment.confirmed", subject, body, channel });
+  const { subject, body } = templates.paymentConfirmed({ customerName: data.customerName, orderRef: data.orderRef, amountPaid: data.amountPaid });
+  const channel = await resolveChannel(data.userId);
+  await send({ userId: data.userId, event: "payment.confirmed", subject, body, channel });
 }
 
 export async function notifyOTPSent(data: {
-  customerId: string;
+  /** User.id of the customer — NOT Customer.id */
+  userId: string;
   customerName: string;
   orderRef: string;
   otpValue: string;
 }): Promise<void> {
   // §20.4 — OTP uses the same channel as configured; MVP uses IN_APP
-  const { subject, body } = templates.otpSent(data);
-  await send({ userId: data.customerId, event: "otp.sent", subject, body, channel: "IN_APP" });
+  const { subject, body } = templates.otpSent({ customerName: data.customerName, orderRef: data.orderRef, otpValue: data.otpValue });
+  await send({ userId: data.userId, event: "otp.sent", subject, body, channel: "IN_APP" });
 }
 
 export async function notifyOrderDelivered(data: {
-  customerId: string;
+  /** User.id of the customer — NOT Customer.id */
+  userId: string;
   customerName: string;
   orderRef: string;
 }): Promise<void> {
-  const { subject, body } = templates.orderDelivered(data);
-  const channel = await resolveChannel(data.customerId);
-  await send({ userId: data.customerId, event: "order.delivered", subject, body, channel });
+  const { subject, body } = templates.orderDelivered({ customerName: data.customerName, orderRef: data.orderRef });
+  const channel = await resolveChannel(data.userId);
+  await send({ userId: data.userId, event: "order.delivered", subject, body, channel });
 }
 
 export async function notifyFailedDelivery(data: {
-  customerId: string;
+  /** User.id of the customer — NOT Customer.id */
+  userId: string;
   customerName: string;
   orderRef: string;
   reason?: string;
 }): Promise<void> {
-  const { subject, body } = templates.failedDelivery(data);
-  const channel = await resolveChannel(data.customerId);
-  await send({ userId: data.customerId, event: "delivery.failed", subject, body, channel });
+  const { subject, body } = templates.failedDelivery({ customerName: data.customerName, orderRef: data.orderRef, reason: data.reason });
+  const channel = await resolveChannel(data.userId);
+  await send({ userId: data.userId, event: "delivery.failed", subject, body, channel });
 }
 
 export async function notifyPaymentReminder(data: {
-  customerId: string;
+  /** User.id of the customer — NOT Customer.id */
+  userId: string;
   customerName: string;
   orderRef: string;
   amountDue: number;
   hoursOld: number;
 }): Promise<void> {
-  const { subject, body } = templates.paymentReminder(data);
-  const channel = await resolveChannel(data.customerId);
-  await send({ userId: data.customerId, event: "payment.reminder", subject, body, channel });
+  const { subject, body } = templates.paymentReminder({ customerName: data.customerName, orderRef: data.orderRef, amountDue: data.amountDue, hoursOld: data.hoursOld });
+  const channel = await resolveChannel(data.userId);
+  await send({ userId: data.userId, event: "payment.reminder", subject, body, channel });
 }
 
 export async function notifyOrderCancelled(data: {
-  customerId: string;
+  /** User.id of the customer — NOT Customer.id */
+  userId: string;
   customerName: string;
   orderRef: string;
   creditIssued?: number;
 }): Promise<void> {
-  const { subject, body } = templates.orderCancelled(data);
-  const channel = await resolveChannel(data.customerId);
-  await send({ userId: data.customerId, event: "order.cancelled", subject, body, channel });
+  const { subject, body } = templates.orderCancelled({ customerName: data.customerName, orderRef: data.orderRef, creditIssued: data.creditIssued });
+  const channel = await resolveChannel(data.userId);
+  await send({ userId: data.userId, event: "order.cancelled", subject, body, channel });
 }
 
 export async function notifyRiderAssigned(data: {
-  riderId: string;
+  /** User.id of the rider — NOT Rider.id */
+  userId: string;
   riderName: string;
   orderRef: string;
   customerName: string;
@@ -230,27 +242,29 @@ export async function notifyRiderAssigned(data: {
     deliveryAddress: data.deliveryAddress,
     slotLabel: data.slotLabel,
   });
-  const channel = await resolveChannel(data.riderId);
-  await send({ userId: data.riderId, event: "delivery.assigned", subject, body, channel });
+  const channel = await resolveChannel(data.userId);
+  await send({ userId: data.userId, event: "delivery.assigned", subject, body, channel });
 }
 
 export async function notifyCreditAdded(data: {
-  customerId: string;
+  /** User.id of the customer — NOT Customer.id */
+  userId: string;
   customerName: string;
   amount: number;
   newBalance: number;
 }): Promise<void> {
-  const { subject, body } = templates.creditAdded(data);
-  await send({ userId: data.customerId, event: "credit.added", subject, body, channel: "IN_APP" });
+  const { subject, body } = templates.creditAdded({ customerName: data.customerName, amount: data.amount, newBalance: data.newBalance });
+  await send({ userId: data.userId, event: "credit.added", subject, body, channel: "IN_APP" });
 }
 
 export async function notifySlotReminder(data: {
-  customerId: string;
+  /** User.id of the customer — NOT Customer.id */
+  userId: string;
   customerName: string;
   orderRef: string;
   slotLabel: string;
 }): Promise<void> {
-  const { subject, body } = templates.slotReminder(data);
-  const channel = await resolveChannel(data.customerId);
-  await send({ userId: data.customerId, event: "slot.reminder", subject, body, channel });
+  const { subject, body } = templates.slotReminder({ customerName: data.customerName, orderRef: data.orderRef, slotLabel: data.slotLabel });
+  const channel = await resolveChannel(data.userId);
+  await send({ userId: data.userId, event: "slot.reminder", subject, body, channel });
 }

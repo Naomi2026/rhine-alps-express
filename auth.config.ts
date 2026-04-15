@@ -77,8 +77,15 @@ export const authConfig = {
       // Public routes
       if (isPublic(pathname)) return true;
 
-      // All other routes require authentication
-      if (!isLoggedIn) return false; // triggers redirect to signIn page
+      // All other routes require authentication.
+      // For API routes, return 401 JSON instead of the NextAuth redirect (which
+      // sends an HTML 307 that non-browser clients cannot parse — BUG-003).
+      if (!isLoggedIn) {
+        if (pathname.startsWith("/api/")) {
+          return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+        }
+        return false; // triggers redirect to signIn page for page routes
+      }
 
       // Role-based route protection
       for (const [prefix, allowedRoles] of Object.entries(PROTECTED_ROUTES)) {

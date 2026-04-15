@@ -1,0 +1,701 @@
+RHINE ALPS EXPRESS — QA BUG REPORT
+Generated: 2026-04-15 23:29 EAT
+Tester: Claude Code (automated QA session)
+Environment: Local development — macOS, Node v24.14.1, PostgreSQL 18
+App version: d3920d3 (Save Phase 5 progress before QA)
+
+══════════════════════════════════════════
+1. EXECUTIVE SUMMARY
+══════════════════════════════════════════
+
+Total bugs found: 8
+
+  Critical: 0 — no complete data loss or full launch blockers found
+  High:     2 — core flow broken, no workaround
+  Medium:   4 — incorrect behavior, workaround exists
+  Low:      2 — cosmetic, minor, non-blocking
+
+Flows tested:     31
+Flows passed:     28
+Flows failed:      2 (notifications, slot capacity)
+Flows blocked:     3 (see below)
+Flows not tested:  4 (see below)
+
+Blocked flows (cannot test — dependency missing):
+  - Successful OTP delivery to customer: The OTP for seeded Order 2 (RAX-20260414-001)
+    was expired at test time. An unexpired OTP was generated for Order 5 but was exhausted
+    by brute-force test. The OTP service itself (generate, hash, verify, expire, rate-limit)
+    was verified. The end-to-end path from customer receiving OTP in a notification to
+    entering it at the door could not be completed because notifications are broken (BUG-001).
+  - Proof-of-delivery photo upload: No upload API route exists. Delivery.proofPhotoUrl
+    field is in the schema but there is no POST /api/deliveries/:id/photo or equivalent.
+  - M-Pesa STK push: External integration is stubbed. No Daraja credentials in .env.
+    Manual M-Pesa code entry was tested and passes.
+
+Flows not tested (feature not built):
+  - Order reschedule flow (§8.9): No API route for reschedule exists. Business rules define
+    it but POST /api/orders/:id/reschedule is absent.
+  - Partial payment settlement (§9.9): No API route or UI path for entering a partial
+    M-Pesa payment and leaving an order in PARTIALLY_PAID state through the admin panel.
+  - COD change-as-credit end-to-end (§9.8): The credit-from-change logic exists in
+    PATCH /api/deliveries/:id/status but could not be exercised as a full COD delivery
+    flow (rider pickup through OTP through cash collection) in this session.
+  - Customer order edit pre-confirmation (§8.3-8.5): PUT/PATCH for delivery address, slot,
+    or payment method on an existing order has no API route; customer must cancel and re-order.
+
+══════════════════════════════════════════
+2. RELEASE READINESS
+══════════════════════════════════════════
+
+Verdict: INTERNAL DEMO ONLY
+
+Key reasons:
+  1. Notifications are completely non-functional due to a foreign key mismatch bug.
+     Customers receive no order confirmations and no OTP codes. In production this
+     means no customer would know their delivery OTP, making delivery confirmation
+     impossible without manual admin intervention.
+  2. Slot capacity enforcement (§3.4) is completely absent. SlotCapacity.bookedOrders
+     is never incremented or decremented. Overbooking cannot be detected or prevented.
+     The same-day delivery cutoff and 30-minute lead-time rules are not enforced at
+     checkout, meaning customers can book a 9 AM slot at 11 PM.
+  3. The API returns 307 HTML redirects for unauthenticated requests instead of 401 JSON.
+     Any non-browser client (mobile app, API integration) will receive an unparseable
+     response on auth failure.
+
+Minimum required before any user-facing release:
+  - Fix BUG-001: Correct the notification service to pass User.id (customer.userId)
+    instead of Customer.id (customer.id) so OTP codes reach customers.
+  - Fix BUG-002 + BUG-007: Wire lib/slots/slot-validator.ts into POST /api/orders
+    to enforce capacity limits and the same-day cutoff and lead-time rules.
+  - Fix BUG-003: Return JSON 401 responses from API routes when unauthenticated,
+    not HTML redirects.
+  - Replace notification stubs with at least one working channel (SMS or in-app push)
+    so OTP codes can actually be delivered to customers.
+
+══════════════════════════════════════════
+3. BUG LIST
+══════════════════════════════════════════
+
+--------------------------------------------------
+Bug ID:             BUG-001
+Title:              Notification service passes Customer.id instead of User.id — all notifications silently fail
+Severity:           High
+Area:               Notifications
+Status:             Open
+Environment:        Local QA
+Reproducible:       Always
+
+Steps to Reproduce:
+  1. Sign in as any customer (e.g. jane.kamau@example.com / Customer123!)
+  2. POST http://localhost:3000/api/orders with valid order body:
+       {"deliveryAddress":"Near dispatch","deliveryLat":-1.145,"deliveryLng":36.961,
+        "slotId":"<any active slot id>","deliveryDate":"2026-04-20","quantity":1,
+        "isExchange":false,"paymentMethod":"MPESA"}
+  3. Observe HTTP 201 response — order is created successfully.
+  4. Run: SELECT count(*) FROM "Notification";
+  5. Check server logs for error output.
+
+Expected Result:
+  Two Notification records are created in the database:
+    - event: order.placed, linked to the customer's user account
+    - event: otp.sent, linked to the customer's user account
+  Per business-rules.md §20.1: "Order placed confirmation shall be sent to the customer."
+  Per §15.1: OTP notification shall follow the configured behavior.
+
+Actual Result:
+  Zero Notification records created.
+  Server logs contain:
+    [notification-service] Failed to send notification: PrismaClientKnownRequestError:
+    Invalid `prisma.notification.create()` invocation:
+    Foreign key constraint violated on the constraint: `Notification_userId_fkey`
+    at lib/notifications/notification-service.ts:51
+
+Evidence:
+  SELECT count(*) FROM "Notification";
+   count
+  -------
+       0
+  (1 row)
+  (After placing 5 orders during QA session — zero notifications in DB)
+
+  Server log excerpt:
+    prisma:error
+    Invalid `prisma.notification.create()` invocation:
+    Foreign key constraint violated on the constraint: `Notification_userId_fkey`
+    [notification-service] Failed to send notification: Error [PrismaClientKnownRequestError]
+    at async send (lib/notifications/notification-service.ts:51:26)
+    at async notifyOTPSent (lib/notifications/notification-service.ts:171:3)
+
+Likely Root Cause:
+  In app/api/orders/route.ts, the notification call passes customer.id (the Customer
+  table's primary key) as the customerId:
+    notifyOrderPlaced({ customerId: customer.id, ... })
+  The notification service then forwards this value as userId to db.notification.create():
+    await db.notification.create({ data: { userId: data.customerId, ... } })
+  But Notification.userId is a foreign key to User.id — a different ID from Customer.id.
+  The two are never equal. The insert fails with a FK violation on every attempt.
+  The .catch(console.error) pattern on the fire-and-forget call suppresses the error
+  from the API response, so orders complete successfully but notifications are silently lost.
+
+Likely Files Involved:
+  app/api/orders/route.ts (lines ~110-130: notification calls pass customer.id)
+  lib/notifications/notification-service.ts (notifyOrderPlaced, notifyOTPSent,
+    resolveChannel — all receive Customer.id, need User.id)
+
+Recommended Fix:
+  In app/api/orders/route.ts, change the customerId passed to notification helpers
+  from customer.id to customer.userId. Specifically:
+    notifyOrderPlaced({ customerId: customer.userId, ... })
+    notifyOTPSent({ customerId: customer.userId, ... })
+  Apply the same correction to any other notification calls that currently receive
+  a Customer record's id field. The notification service parameter naming should
+  also be updated to reflect that it expects a User.id, not a Customer.id, to
+  prevent recurrence.
+--------------------------------------------------
+
+--------------------------------------------------
+Bug ID:             BUG-002
+Title:              Slot capacity (SlotCapacity.bookedOrders) never incremented — overbooking undetectable
+Severity:           High
+Area:               Slots
+Status:             Open
+Environment:        Local QA
+Reproducible:       Always
+
+Steps to Reproduce:
+  1. Note the active slot ID from: SELECT id FROM "DeliverySlot" WHERE "isActive"=true LIMIT 1;
+  2. Place 5 or more orders for the same slot, same date, same pricing band using any customer session.
+  3. Run:
+       SELECT "bookedOrders", count(*) FROM "SlotCapacity" GROUP BY "bookedOrders";
+  4. Also run:
+       SELECT sc."bookedOrders", COUNT(o.id) as actual_orders
+       FROM "SlotCapacity" sc
+       LEFT JOIN "Order" o ON o."slotId"=sc."slotId"
+         AND o."deliveryDate"=sc.date
+         AND o.status NOT IN ('CANCELLED','COMPLETED')
+       GROUP BY sc."bookedOrders"
+       HAVING sc."bookedOrders" != COUNT(o.id);
+
+Expected Result:
+  Per business-rules.md §3.4: "Slot capacity shall be measured as the maximum number
+  of orders allowed per zone per delivery slot." bookedOrders should increment each time
+  an order is placed for that slot/band/date, and decrement on cancellation. Orders
+  exceeding maxOrders (default: 20) should be rejected or redirected to the next slot.
+
+Actual Result:
+  bookedOrders = 0 for all 12 SlotCapacity rows regardless of how many orders are placed.
+  8 orders were placed during the QA session; no capacity was ever recorded.
+  The discrepancy query returns 3 rows showing actual order counts vs 0 capacity tracked.
+
+Evidence:
+  SELECT "bookedOrders", count(*) FROM "SlotCapacity" GROUP BY "bookedOrders";
+   bookedOrders | count
+  --------------+-------
+              0 |    12
+  (After 8 orders placed across multiple slots)
+
+  Capacity discrepancy check:
+   slotId                    | pricingBand | date       | capacity_booked | actual_orders
+   cmo07pjft000krftem88bxmuq | BAND_1      | 2026-04-14 |               0 |             1
+   cmo07pjfu000lrftewtaqw9m0 | BAND_2      | 2026-04-14 |               0 |             1
+   cmo07pjfu000mrftele4qxy51 | BAND_3      | 2026-04-14 |               0 |             1
+
+Likely Root Cause:
+  lib/slots/slot-validator.ts implements full capacity validation logic (checkSlotAvailability,
+  suggestNextSlot, meetsLeadTime, checkSameDayEligibility) and was built in Phase 2.
+  However, app/api/orders/route.ts only checks slot.isActive — it never imports or calls
+  anything from slot-validator.ts. SlotCapacity records are never read during order placement
+  and bookedOrders is never incremented. The validator is dead code as far as the order
+  flow is concerned.
+
+Likely Files Involved:
+  app/api/orders/route.ts (slot check at line ~80: only checks slot.isActive)
+  lib/slots/slot-validator.ts (fully implemented, never imported or called)
+
+Recommended Fix:
+  In app/api/orders/route.ts, after confirming the slot is active:
+  1. Import checkSlotAvailability (or the relevant functions) from lib/slots/slot-validator.ts.
+  2. Call the validator with the slot, deliveryDate, pricingBand, and capacity records.
+  3. If validation fails (capacity full, past cutoff, insufficient lead time), return 400
+     with the reason and optionally suggest the next available slot.
+  4. On successful order creation, increment SlotCapacity.bookedOrders for the matching
+     slotId + pricingBand + date row (create the row if it does not exist for that date).
+  5. In the cancel route (app/api/orders/:id/cancel/route.ts), decrement bookedOrders
+     when an order is cancelled.
+--------------------------------------------------
+
+--------------------------------------------------
+Bug ID:             BUG-003
+Title:              Unauthenticated API requests return 307 HTML redirect instead of 401 JSON
+Severity:           Medium
+Area:               API Validation / Auth
+Status:             Open
+Environment:        Local QA
+Reproducible:       Always
+
+Steps to Reproduce:
+  1. Without any session cookie, call any protected API route:
+       curl -sv http://localhost:3000/api/reports?type=daily-sales
+       curl -sv -X POST http://localhost:3000/api/orders
+  2. Observe the HTTP response code and Location header.
+
+Expected Result:
+  HTTP 401 with body: {"error":"Unauthorized"}
+  API clients (mobile apps, automated scripts, non-browser consumers) can parse this
+  and handle authentication failure programmatically.
+
+Actual Result:
+  HTTP 307 Temporary Redirect
+  Location: /login?callbackUrl=http%3A%2F%2Flocalhost%3A3000%2Fapi%2Freports%3F...
+  The response body is empty. Any non-browser HTTP client receives a redirect to
+  an HTML login page and cannot parse the response as JSON.
+
+Evidence:
+  curl -sv "http://localhost:3000/api/reports?type=daily-sales" 2>&1 | grep "< HTTP\|< location"
+  < HTTP/1.1 307 Temporary Redirect
+  < location: /login?type=daily-sales&callbackUrl=http%3A%2F%2Flocalhost%3A3000%2Fapi%2Freports%3Ftype%3Ddaily-sales
+
+  Same behavior confirmed for: POST /api/orders, POST /api/users, PATCH /api/profile,
+  PATCH /api/slots/:id/toggle, POST /api/orders/:id/cancel, POST /api/orders/:id/confirm,
+  PATCH /api/deliveries/:id/status
+
+Likely Root Cause:
+  middleware.ts applies NextAuth's authorized() callback to ALL matched routes, including
+  /api/* paths. The callback returns false for unauthenticated requests, which NextAuth
+  translates into a redirect to the signIn page (configured as /login) for both page
+  routes and API routes alike. No special handling distinguishes API paths from page paths.
+
+Likely Files Involved:
+  middleware.ts (applies uniform redirect to all routes)
+  auth.config.ts (authorized callback — no /api/ path check)
+
+Recommended Fix:
+  In the authorized callback in auth.config.ts, detect API routes by checking whether
+  pathname starts with "/api/" (excluding "/api/auth"). For API paths, return a
+  NextResponse.json({ error: "Unauthorized" }, { status: 401 }) instead of allowing
+  NextAuth to redirect. The lib/auth/api-auth.ts requireRole() helper already returns
+  proper 401/403 responses for routes that reach the handler — the fix is to also
+  intercept at the middleware level for routes that are blocked before reaching the handler.
+--------------------------------------------------
+
+--------------------------------------------------
+Bug ID:             BUG-004
+Title:              orderRef sequence uses db.order.count() — race condition causes 500 under concurrent requests
+Severity:           Medium
+Area:               Orders / Data Integrity
+Status:             Open
+Environment:        Local QA
+Reproducible:       Intermittent (under concurrent load)
+
+Steps to Reproduce:
+  1. Simulate two simultaneous order placements (same customer or different customers):
+       curl -s -b <session> -X POST .../api/orders -d <valid_order_body> &
+       curl -s -b <session> -X POST .../api/orders -d <valid_order_body> &
+       wait
+  2. Observe that one request may return a 500 Internal Server Error.
+  3. Confirm by checking the Order.orderRef @unique constraint in the schema.
+
+Expected Result:
+  Every successful order placement returns a unique orderRef.
+  If two requests arrive simultaneously, both should succeed with distinct refs.
+
+Actual Result:
+  Two concurrent requests both read the same db.order.count() value N, both compute
+  "RAX-YYYYMMDD-00N", and both attempt to INSERT with that ref. The second INSERT
+  fails with a unique constraint violation. The API returns HTTP 500 to that customer
+  with no useful error message. The customer's order is lost without notification.
+
+Evidence:
+  Schema constraint confirmed:
+    SELECT indexdef FROM pg_indexes WHERE tablename='Order' AND indexname LIKE '%orderRef%';
+    CREATE UNIQUE INDEX "Order_orderRef_key" ON public."Order" USING btree ("orderRef")
+
+  Code in app/api/orders/route.ts:
+    const orderCount = await db.order.count();
+    const orderRef = generateOrderRef(orderCount + 1);
+  These two lines are not atomic. Two requests reading simultaneously get the same count.
+
+Likely Root Cause:
+  The orderRef generation reads a non-atomic count, computes a ref, then inserts. There
+  is no lock, no DB sequence, and no retry logic. The unique constraint is the only safety
+  net, but it surfaces as a 500 rather than a clean duplicate-detection and retry.
+
+Likely Files Involved:
+  app/api/orders/route.ts (lines ~70-71: db.order.count() then generateOrderRef)
+  lib/utils.ts (generateOrderRef — pure function, not the issue)
+
+Recommended Fix:
+  Replace the count-based sequence with a collision-resistant approach. Options in
+  increasing robustness: (1) append a short random suffix to the ref and retry on unique
+  constraint violation; (2) use a PostgreSQL sequence via Prisma ($queryRaw is not in use
+  elsewhere — a migration adding a sequence is clean); (3) use a UUID-based ref internally
+  and generate a human-readable ref as a separate presentation concern. At minimum, catch
+  the P2002 Prisma unique constraint error in the catch block of route.ts and return a
+  422 with a meaningful message rather than a 500.
+--------------------------------------------------
+
+--------------------------------------------------
+Bug ID:             BUG-005
+Title:              Same-day delivery cutoff and 30-minute lead-time rules not enforced at checkout
+Severity:           Medium
+Area:               Slots
+Status:             Open
+Environment:        Local QA
+Reproducible:       Always
+
+Steps to Reproduce:
+  1. Sign in as any customer.
+  2. At 11:00 PM, POST /api/orders with:
+       "slotId": "<9:00 AM – 12:00 PM slot id>",
+       "deliveryDate": "<today's date>"
+     (Slot 1 closes at 12:00 PM; it is now 23:00 — 11 hours after the slot ended.)
+  3. Observe that the order is created successfully with HTTP 201.
+
+Expected Result:
+  Per business-rules.md §3.3: "The minimum lead time for booking a slot shall be 30 minutes."
+  Per §2.2: Orders accepted until 8:00 PM but delivery cutoff rules apply by band.
+  Per §2.3: Band 2 and Band 3 orders after 6:30 PM are next-day only.
+  The API should reject a past-time slot with an appropriate error and suggest the next
+  available slot.
+
+Actual Result:
+  Order created successfully for a slot that ended 11 hours ago. No validation of
+  delivery date/time against slot timing or operating hour rules occurs.
+  Orders placed after 8:00 PM for same-day slots also succeed.
+
+Evidence:
+  Orders RAX-20260415-005 through RAX-20260415-008 were all placed at ~20:10 EAT
+  for deliveryDate 2026-04-20 with the 9:00 AM – 12:00 PM slot. All accepted.
+  The slot validator's output:
+    lib/slots/slot-validator.ts exports meetsLeadTime(), checkSameDayEligibility()
+    Neither function is imported or called from app/api/orders/route.ts.
+
+Likely Root Cause:
+  Same root cause as BUG-002. The slot validator (lib/slots/slot-validator.ts) is
+  fully implemented but never called during order placement. The entire file is dead
+  code from the perspective of the running application.
+
+Likely Files Involved:
+  app/api/orders/route.ts (no time-based slot validation)
+  lib/slots/slot-validator.ts (meetsLeadTime, checkSameDayEligibility — unhooked)
+
+Recommended Fix:
+  When wiring in the slot validator for BUG-002, also include the same-day cutoff
+  and lead-time checks. Specifically: after the slot.isActive check, call the full
+  checkSlotAvailability function which internally calls meetsLeadTime() and
+  checkSameDayEligibility() based on the order's deliveryDate, the slot's start/end
+  times, the pricing band, and the current Nairobi time.
+--------------------------------------------------
+
+--------------------------------------------------
+Bug ID:             BUG-006
+Title:              Seeded loyalty counts do not match qualifying completed orders in the database
+Severity:           Medium
+Area:               Loyalty / Data Integrity
+Status:             Open
+Environment:        Local QA
+Reproducible:       Always (data state issue, not runtime)
+
+Steps to Reproduce:
+  1. Run the following reconciliation query:
+       SELECT u.name, c."loyaltyCount" as stored,
+              COUNT(o.id) as actual_qualifying
+       FROM "Customer" c
+       JOIN "User" u ON u.id=c."userId"
+       LEFT JOIN "Order" o ON o."customerId"=c.id
+         AND o.status='COMPLETED'
+         AND o."countsForLoyalty"=true
+         AND o."isLoyaltyReward"=false
+       GROUP BY u.name, c."loyaltyCount";
+
+Expected Result:
+  loyaltyCount matches the count of completed qualifying orders in the database for
+  every customer. Per business-rules.md §11.1: "Only completed and valid qualifying
+  orders shall count toward loyalty."
+
+Actual Result:
+  John Njoroge: stored=3, actual qualifying=0
+  Jane Kamau:   stored=7, actual qualifying=1 (RAX-20260411-001)
+  Mary Achieng: stored=0, actual qualifying=0
+
+Evidence:
+      name     | stored | actual_qualifying
+  John Njoroge |      3 |                 0
+  Jane Kamau   |      7 |                 1
+  Mary Achieng |      0 |                 0
+
+  Jane's stored count increases from 7 to 8 correctly when Order 7 is completed
+  (loyalty increment was tested and verified). The discrepancy is in the seed data.
+
+Likely Root Cause:
+  prisma/seed.ts pre-sets loyaltyCount values (7 for jane.kamau, 3 for john.njoroge)
+  to simulate prior off-system order history, but does not seed the corresponding
+  COMPLETED Order rows. This produces a divergence between the stored count and any
+  loyalty audit based on DB records. The runtime increment logic is correct. This is
+  a seed data design issue, not a runtime code bug.
+
+Likely Files Involved:
+  prisma/seed.ts (loyaltyCount: 7 and loyaltyCount: 3 set without matching COMPLETED rows)
+
+Recommended Fix:
+  Either (a) seed additional COMPLETED Order rows for jane.kamau and john.njoroge that
+  account for the pre-set loyalty counts (7 and 3 qualifying orders respectively), giving
+  the demo database a consistent state for audit queries; or (b) add a comment in seed.ts
+  explaining that the counts represent off-platform history and are intentionally not
+  backed by Order rows in this seed. Option (a) is recommended as it makes the demo more
+  robust and prevents false positives in any loyalty audit tooling.
+--------------------------------------------------
+
+--------------------------------------------------
+Bug ID:             BUG-007
+Title:              Provisional pricing on address-only Band 2 orders not surfaced to customer in API response
+Severity:           Low
+Area:               Pricing / UI
+Status:             Open
+Environment:        Local QA
+Reproducible:       Always (when placing Band 2 order without coordinates)
+
+Steps to Reproduce:
+  1. Sign in as a customer.
+  2. POST /api/orders with a Band 2 address (e.g. "Kahawa Sukari Estate") and no
+     deliveryLat / deliveryLng:
+       {"deliveryAddress":"Kahawa Sukari Estate","slotId":"...","deliveryDate":"2026-04-20",
+        "quantity":3,"isExchange":true,"paymentMethod":"MPESA"}
+  3. Observe the API response: {"id":"...","orderRef":"RAX-..."}
+  4. Check the DB: SELECT "isProvisionalPrice" FROM "Order" WHERE "orderRef"='...';
+
+Expected Result:
+  Per business-rules.md §7.6: "If a location requires validation or is ambiguous, the
+  customer shall first see provisional delivery charges." The API response should include
+  an isProvisional flag (or equivalent) so the client can display a provisional pricing
+  warning to the customer.
+
+Actual Result:
+  API response contains only {id, orderRef}. isProvisionalPrice is stored as true in
+  the database but is not communicated back to the caller. The customer portal renders
+  the order with no visual indication that the price may change.
+
+Evidence:
+  POST /api/orders response: {"id":"cmo0hkamx000frfnn7heuxcnu","orderRef":"RAX-20260415-006"}
+  SELECT "isProvisionalPrice" FROM "Order" WHERE "orderRef"='RAX-20260415-006';
+   isProvisionalPrice
+  --------------------
+   t
+  (1 row)
+
+Likely Root Cause:
+  app/api/orders/route.ts returns only {id, orderRef} on success. The isProvisionalPrice
+  flag is stored on the Order but not included in the response body. The customer order
+  detail page (app/(customer)/customer/orders/[id]/page.tsx) does not render any
+  provisional warning when isProvisionalPrice is true.
+
+Likely Files Involved:
+  app/api/orders/route.ts (response: only id and orderRef returned)
+  app/(customer)/customer/orders/[id]/page.tsx (no provisional pricing alert)
+
+Recommended Fix:
+  In app/api/orders/route.ts, include isProvisional: order.isProvisionalPrice in the
+  201 response so the client can display an appropriate message at order creation time.
+  In app/(customer)/customer/orders/[id]/page.tsx, render a visible alert when
+  order.isProvisionalPrice is true explaining that the delivery fee is subject to
+  change pending location validation.
+--------------------------------------------------
+
+--------------------------------------------------
+Bug ID:             BUG-008
+Title:              lib/auth/rbac.ts is dead code — never imported anywhere
+Severity:           Low
+Area:               API Validation / Code Quality
+Status:             Open
+Environment:        Local QA
+Reproducible:       Always
+
+Steps to Reproduce:
+  1. Run: grep -rn "from.*rbac" app/ lib/ --include="*.ts" --include="*.tsx"
+  2. Observe: zero results.
+
+Expected Result:
+  All files in lib/ are used by the application. Dead code should be removed to avoid
+  confusion about whether rbac.ts is an alternative to api-auth.ts or session.ts.
+
+Actual Result:
+  lib/auth/rbac.ts exists and contains role-check logic but is never imported by any
+  file in app/ or lib/. The actual RBAC enforcement is done via lib/auth/api-auth.ts
+  (requireRole for API routes) and lib/auth/session.ts (requireAuthWithRole for page
+  layouts). The rbac.ts file appears to be a Phase 1 scaffold remnant that was superseded.
+
+Evidence:
+  grep -rn "from.*rbac" app/ lib/ --include="*.ts" --include="*.tsx"
+  (no output — 0 matches)
+
+Likely Root Cause:
+  lib/auth/rbac.ts was scaffolded in Phase 1 but the actual RBAC implementation was
+  built differently in later phases using api-auth.ts and session.ts. The original file
+  was never removed.
+
+Likely Files Involved:
+  lib/auth/rbac.ts
+
+Recommended Fix:
+  Delete lib/auth/rbac.ts. If any logic in it is not already covered by api-auth.ts
+  or session.ts, migrate it first — but a review shows the functionality is duplicated.
+--------------------------------------------------
+
+══════════════════════════════════════════
+4. MISSING / INCOMPLETE FUNCTIONALITY
+══════════════════════════════════════════
+
+Feature:         Order reschedule
+Current State:   Not started
+What Exists:     canRescheduleOrder() guard in lib/orders/status-guards.ts;
+                 hasBeenRescheduled field on Order schema; business rules §8.9 fully documented
+What Is Missing: POST /api/orders/:id/reschedule route; customer UI flow to request reschedule;
+                 admin UI to reschedule after failed delivery
+Impact:          Customers have no self-service reschedule option. Admins must cancel and
+                 recreate orders to reschedule. §8.9 compliance not met.
+
+Feature:         Customer order edit (address / slot / payment method pre-confirmation)
+Current State:   Not started
+What Exists:     canCustomerEditOrder() guard in status-guards.ts; business rules §8.3-8.5
+What Is Missing: PATCH /api/orders/:id route for customer edits; repricing logic on address
+                 change; UI controls on /customer/orders/[id] page
+Impact:          Customers cannot edit address, slot, or payment method on an open order.
+                 §8.3, §8.4, §8.5 not met. Workaround is cancel-and-reorder.
+
+Feature:         SMS / WhatsApp / Email notification channels
+Current State:   Stub — stubs exist, no external integration
+What Exists:     sendSMS(), sendWhatsApp(), sendEmail() stub functions in
+                 lib/notifications/notification-service.ts; env var documentation for
+                 SMS_PROVIDER_API_KEY, GOOGLE_MAPS_API_KEY
+What Is Missing: Africa's Talking (or Twilio) SDK integration; WhatsApp Business API call;
+                 Resend / SendGrid email send. Once BUG-001 is fixed, the DB persistence
+                 will work but external delivery will still not occur.
+Impact:          Customers receive no out-of-app notifications. OTP can only be retrieved by
+                 admin from the database. No order confirmation SMS. §20.1, §20.3 not met.
+
+Feature:         M-Pesa STK Push (Daraja API)
+Current State:   Stub — env vars documented, no code
+What Exists:     MPESA_* env vars in .env.example; manual M-Pesa code entry via
+                 POST /api/orders/:id/verify-payment works correctly
+What Is Missing: Daraja API integration: STK push initiation, callback handler, automatic
+                 payment status update on confirmed callback
+Impact:          Payments require manual code entry by admin. No automated payment
+                 confirmation. Increases admin workload for every M-Pesa order.
+
+Feature:         Proof-of-delivery photo upload
+Current State:   Partial — schema only
+What Exists:     Delivery.proofPhotoUrl field in schema; rider UI has a note field
+What Is Missing: POST /api/deliveries/:id/photo route; file upload handling; S3 or equivalent
+                 storage; display in admin order detail
+Impact:          §18.5 requirement "Rider may upload a note or photo for failed delivery"
+                 is partially met (notes) but photo upload is absent.
+
+Feature:         Unpaid order reminder background jobs
+Current State:   Partial — service exists, no scheduler
+What Exists:     notifyPaymentReminder() in notification-service.ts; UNPAID_REMINDER_FIRST_HOURS
+                 and UNPAID_REMINDER_SECOND_HOURS system settings seeded
+What Is Missing: Cron job or scheduled function to query unpaid orders at 12h and 24h marks
+                 and trigger the reminder notification
+Impact:          §9.10 compliance not met. Customers with unpaid orders receive no reminders.
+                 Admin dashboard shows unpaid alerts but no automated customer outreach occurs.
+
+Feature:         Slot reminder notifications
+Current State:   Partial — service exists, no scheduler
+What Exists:     notifySlotReminder() in notification-service.ts
+What Is Missing: Cron job to send reminders before each delivery window
+Impact:          §20.1 requirement "Customers shall receive slot reminders before delivery"
+                 not met.
+
+Feature:         End-of-day cash reconciliation
+Current State:   Partial — data captured, no UI
+What Exists:     Delivery.cashCollected field; cash amounts recorded via delivery status API;
+                 logCashCollection() audit entries
+What Is Missing: Admin reconciliation page or report; workflow for rider to hand cash to admin
+                 and mark handoff; discrepancy / incident creation
+Impact:          §22 "End-of-day rider cash reconciliation shall be required" and "Rider must
+                 hand cash to admin and mark handoff" are not implemented. Cash data is in
+                 the DB but there is no workflow to act on it.
+
+Feature:         Partial payment flow (§9.9)
+Current State:   Partial — schema and payment status support it, no route
+What Exists:     PaymentStatus.PARTIALLY_PAID enum value; Payment table supports multiple
+                 records per order
+What Is Missing: Admin UI or API route to record a second partial payment completing the
+                 balance; display of remaining balance; payment status progression logic
+                 from PARTIALLY_PAID to PAID
+Impact:          §9.9 "Partial payment shall be supported in MVP" is listed as a requirement
+                 but the end-to-end flow is incomplete.
+
+Feature:         Automated test suite
+Current State:   Not started
+What Exists:     Zero test files (confirmed: find . -name "*.test.ts" → no results)
+What Is Missing: Unit tests for pricing engine, status guards, OTP service, credit service,
+                 slot validator; integration tests for all API routes; E2E tests for order
+                 placement through delivery confirmation
+Impact:          All business logic is untested by automated tests. Regressions will not be
+                 caught. Confidence in fixes requires manual re-execution of this QA session.
+
+══════════════════════════════════════════
+5. RETEST PRIORITIES
+══════════════════════════════════════════
+
+After fixes are applied, retest in this exact order:
+
+  1. BUG-001 (Notifications): Place a new order, verify Notification rows are created
+     in the DB with correct userId (must match User.id, not Customer.id). Verify
+     event=order.placed and event=otp.sent are both persisted. Check no FK errors in logs.
+
+  2. BUG-002 (Slot capacity): Place an order for a specific slot/band/date. Query
+     SlotCapacity to confirm bookedOrders incremented by 1. Cancel the order. Confirm
+     bookedOrders decremented. Place maxOrders+1 orders for the same slot — confirm the
+     last one is rejected with an appropriate message.
+
+  3. BUG-005 (Same-day cutoff): At a time after 18:30, attempt to place a same-day
+     Band 2 order — should be rejected. Attempt a Band 1 order after 18:30 — should
+     still be accepted. Attempt any order after 20:00 — should require next-day date.
+
+  4. BUG-003 (API 401): Call any protected API endpoint without a session cookie.
+     Confirm HTTP 401 with JSON body {"error":"Unauthorized"}, not a 307 redirect.
+
+  5. BUG-004 (orderRef race): Simulate concurrent order placement. Confirm both orders
+     succeed with distinct refs, or that the second receives a clean 422 with a user-facing
+     message rather than a 500.
+
+  6. BUG-006 (Loyalty seed): Run the loyalty reconciliation query. Confirm stored counts
+     match actual qualifying order counts in the DB.
+
+  7. BUG-007 (Provisional pricing): Place an address-only Band 2 order. Confirm the
+     API response includes an isProvisional flag. Confirm the customer order detail
+     page displays a provisional pricing warning.
+
+  8. BUG-008 (Dead code): Confirm lib/auth/rbac.ts no longer exists.
+
+  9. Full OTP delivery path (previously blocked by BUG-001): Once notifications are
+     fixed, place an order, retrieve the OTP from the in-app notification, submit it
+     via the rider session, and verify delivery status advances to DELIVERED.
+
+  10. Notification delivery for cancel, payment, and rider assignment events: After
+      wiring additional notification calls, trigger each event and verify a Notification
+      row is created for the correct user.
+
+══════════════════════════════════════════
+6. SUGGESTED FIX BATCHES
+══════════════════════════════════════════
+
+Fix Batch 1 — HIGH (fix before any demo)
+  - BUG-001: Notification service passes Customer.id instead of User.id — all notifications silently fail
+  - BUG-002: Slot capacity (SlotCapacity.bookedOrders) never incremented — overbooking undetectable
+
+Fix Batch 2 — MEDIUM (fix before MVP launch)
+  - BUG-003: Unauthenticated API requests return 307 HTML redirect instead of 401 JSON
+  - BUG-004: orderRef sequence uses db.order.count() — race condition causes 500 under concurrent requests
+  - BUG-005: Same-day delivery cutoff and 30-minute lead-time rules not enforced at checkout
+  - BUG-006: Seeded loyalty counts do not match qualifying completed orders in the database
+
+Fix Batch 3 — LOW (fix before production)
+  - BUG-007: Provisional pricing on address-only Band 2 orders not surfaced to customer in API response
+  - BUG-008: lib/auth/rbac.ts is dead code — never imported anywhere
+
+══════════════════════════════════════════
+END OF REPORT
+══════════════════════════════════════════

@@ -87,6 +87,17 @@ export default async function CustomerOrderDetailPage({
         {order.delivery && <DeliveryStatusBadge status={order.delivery.status} />}
       </div>
 
+      {/* §7.6 — Provisional pricing warning */}
+      {order.isProvisionalPrice && (
+        <div className="rounded-lg border border-amber-200 bg-amber-50 p-4">
+          <p className="text-sm font-medium text-amber-800">Provisional Delivery Fee</p>
+          <p className="mt-1 text-xs text-amber-700">
+            Your delivery fee is an estimate pending address verification. The final fee
+            will be confirmed once your location is validated.
+          </p>
+        </div>
+      )}
+
       {/* Delivery location */}
       <Card>
         <CardHeader className="pb-2">
