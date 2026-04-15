@@ -12,7 +12,7 @@ import Credentials from "next-auth/providers/credentials";
 import bcrypt from "bcryptjs";
 import { z } from "zod";
 
-import { prisma } from "@/lib/db";
+import { db } from "@/lib/db";
 import { authConfig } from "@/auth.config";
 
 const credentialsSchema = z.object({
@@ -46,7 +46,7 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
 
         if (!email && !phone) return null;
 
-        const user = await prisma.user.findFirst({
+        const user = await db.user.findFirst({
           where: email ? { email } : { phone },
           select: {
             id: true,
@@ -74,7 +74,7 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
           const newCount = user.failedLogins + 1;
           const lockThreshold = 3; // matches FAILED_LOGIN_LOCKOUT_THRESHOLD system setting
 
-          await prisma.user.update({
+          await db.user.update({
             where: { id: user.id },
             data: {
               failedLogins: newCount,
@@ -87,7 +87,7 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
 
         // Successful login — reset failed counter
         if (user.failedLogins > 0) {
-          await prisma.user.update({
+          await db.user.update({
             where: { id: user.id },
             data: { failedLogins: 0 },
           });
