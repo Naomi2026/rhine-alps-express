@@ -1,14 +1,14 @@
 /**
  * app/(auth)/login/page.tsx
  *
- * Login page stub.
- * Route is public — middleware redirects authenticated users away.
- * Full form implementation is built in Phase 3.
+ * Login page. Public route — middleware redirects authenticated users away.
  */
 
 import type { Metadata } from "next";
+import Link from "next/link";
+import { LoginForm } from "./login-form";
 
-export const metadata: Metadata = { title: "Sign In" };
+export const metadata: Metadata = { title: "Sign In — Rhine Alps Express" };
 
 export default function LoginPage() {
   return (
@@ -18,9 +18,14 @@ export default function LoginPage() {
           <h1 className="text-2xl font-bold tracking-tight">Rhine Alps Express</h1>
           <p className="text-sm text-muted-foreground">Sign in to your account</p>
         </div>
-        {/* Form component added in Phase 3 */}
-        <p className="text-center text-xs text-muted-foreground">
-          Phase 1 scaffold — form coming in Phase 3
+
+        <LoginForm />
+
+        <p className="text-center text-sm text-muted-foreground">
+          Don&apos;t have an account?{" "}
+          <Link href="/register" className="font-medium text-primary hover:underline">
+            Register
+          </Link>
         </p>
       </div>
     </main>
