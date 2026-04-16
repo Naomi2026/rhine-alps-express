@@ -19,12 +19,75 @@ import {
 
 // ── Time helpers (Nairobi = UTC+3) ────────────────────────────────────────────
 
-const NAIROBI_OFFSET_HOURS = 3;
+/**
+ * Extract time parts (year, month, day, hour, minute, second) for a given Date
+ * as they appear in the Africa/Nairobi timezone, regardless of the server's own
+ * timezone setting.
+ *
+ * We use Intl.DateTimeFormat with an explicit timeZone instead of manual offset
+ * arithmetic. The old pattern:
+ *
+ *   new Date(new Date().getTime() + 3 * 3600 * 1000)
+ *
+ * worked on a UTC server because adding 3 h to the UTC epoch made .getHours()
+ * return the EAT hour. However, on a server already running in Africa/Nairobi
+ * (EAT = UTC+3), new Date().getHours() already returns EAT hours, so adding
+ * another 3 h produced UTC+6 — causing isToday(), checkSameDayEligibility(), and
+ * meetsLeadTime() to silently evaluate wrong times on non-UTC servers (BUG-009).
+ *
+ * Intl.DateTimeFormat queries the engine for the named timezone directly and is
+ * unaffected by the Node.js process timezone.
+ */
+function nairobiDateParts(base: Date): {
+  year: number;
+  month: number; // 1-12
+  day: number;
+  hour: number;
+  minute: number;
+  second: number;
+} {
+  const parts = new Intl.DateTimeFormat("en", {
+    timeZone: "Africa/Nairobi",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  }).formatToParts(base);
 
-/** Return the current Date adjusted to Nairobi local time. */
-export function nowNairobi(): Date {
-  const utc = new Date();
-  return new Date(utc.getTime() + NAIROBI_OFFSET_HOURS * 60 * 60 * 1000);
+  const v = (type: string): number =>
+    Number(parts.find((p) => p.type === type)?.value ?? "0");
+
+  return {
+    year: v("year"),
+    month: v("month"),   // 1-based
+    day: v("day"),
+    hour: v("hour"),
+    minute: v("minute"),
+    second: v("second"),
+  };
+}
+
+/**
+ * Return a Date whose .getFullYear() / .getMonth() / .getDate() / .getHours() /
+ * .getMinutes() methods all reflect the current (or given) moment in the
+ * Africa/Nairobi timezone, regardless of what timezone the server process runs in.
+ *
+ * The optional `base` parameter lets callers inject a specific moment for testing
+ * without changing the system clock — pass any Date and get back the equivalent
+ * Nairobi-local Date.
+ *
+ * Implementation note: we use new Date(year, month-1, day, h, m, s) which
+ * constructs a Date in the process's local time using the Nairobi values we
+ * extracted. Whatever the server TZ, .getHours() etc. will return the Nairobi
+ * values we passed to the constructor.
+ */
+export function nowNairobi(base: Date = new Date()): Date {
+  const { year, month, day, hour, minute, second } = nairobiDateParts(base);
+  // month is 1-based from Intl; Date constructor expects 0-based month
+  return new Date(year, month - 1, day, hour, minute, second);
 }
 
 /**
